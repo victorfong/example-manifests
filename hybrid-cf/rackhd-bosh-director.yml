@@ -1,0 +1,139 @@
+---
+name: ${DIRECTOR_DEPLOYMENT_NAME}
+director_uuid: $(bosh status --uuid)
+disk_pools:
+- name: disks
+  disk_size: 15_000
+resource_pools:
+- name: vms
+  network: vm-network
+  stemcell:
+    name: bosh-vsphere-esxi-ubuntu-trusty-go_agent
+    version: latest
+  cloud_properties:
+    cpu: 4
+    ram: 4_096
+    disk: 15_000
+  env:
+    bosh:
+      # c1oudc0w is a default password for vcap user
+      password: ${password}
+compilation:
+  workers: 1
+  network: vm-network
+  reuse_compilation_vms: true
+  cloud_properties:
+    cpu: 2
+    ram: 3_840
+    disk: 8_096
+update:
+  canaries: 1
+  max_in_flight: 1
+  serial: false
+  canary_watch_time: 1000-60000
+  update_watch_time: 1000-60000
+# replace all addresses with your network's IP range
+#
+# e.g. X.X.0.2 -> 10.0.0.2
+networks:
+  - name: vm-network
+    type: manual
+    subnets:
+      - range: 192.168.0.0/16
+        gateway: 192.168.10.1
+        dns: [192.168.10.1]
+        reserved: [192.168.0.2 - 192.168.9.255]
+        static:
+          - ${BOSH_DIRECTOR_PUBLIC_IP} - ${BOSH_DIRECTOR_PUBLIC_IP}
+        cloud_properties: {name: 'VM Network'}
+  - name: rackhd-network
+    type: manual
+    subnets:
+      - range: 172.31.128.0/22
+        gateway: 172.31.128.1
+        dns: [172.31.128.1]
+        #reserved: [172.31.128.1-172.31.128.255]
+        static:
+          - ${BOSH_DIRECTOR_PRIVATE_IP} - ${BOSH_DIRECTOR_PRIVATE_IP}
+        cloud_properties: {name: '${RACKHD_NETWORK}'}
+releases:
+  - name: bosh
+    version: latest
+  - name: ${CPI_RELEASE_NAME}
+    version: latest
+jobs:
+- name: bosh
+  instances: 1
+  templates:
+  - {name: nats, release: bosh}
+  - {name: redis, release: bosh}
+  - {name: postgres, release: bosh}
+  - {name: blobstore, release: bosh}
+  - {name: director, release: bosh}
+  - {name: health_monitor, release: bosh}
+  - {name: rackhd-cpi, release: ${CPI_RELEASE_NAME}}
+  resource_pool: vms
+  persistent_disk_pool: disks
+  networks:
+  - {name: vm-network, static_ips: [${BOSH_DIRECTOR_PUBLIC_IP}], default: [dns, gateway]}
+  - {name: rackhd-network, static_ips: [${BOSH_DIRECTOR_PRIVATE_IP}]}
+  properties:
+    nats:
+      address: 127.0.0.1
+      user: nats
+      password: nats-password
+    redis:
+      listen_address: 127.0.0.1
+      address: 127.0.0.1
+      password: redis-password
+    postgres: &db
+      listen_address: 127.0.0.1
+      host: 127.0.0.1
+      user: postgres
+      password: postgres-password
+      database: bosh
+      adapter: postgres
+    blobstore:
+      address: ${BOSH_DIRECTOR_PUBLIC_IP}
+      port: 25250
+      use_ssl: false
+      provider: dav
+      director: {user: director, password: director-password}
+      agent: {user: agent, password: agent-password}
+    director:
+      address: 127.0.0.1
+      name: my-bosh
+      db: *db
+      cpi_job: rackhd-cpi
+      user_management:
+        provider: local
+        local:
+          users:
+          - {name: admin, password: admin}
+          - {name: hm, password: hm-password}
+    hm:
+      director_account: {user: hm, password: hm-password}
+      resurrector_enabled: true
+    rackhd-cpi:
+      api_url: "${RACKHD_API_URL}"
+      agent:
+        mbus: "nats://nats:nats-password@${BOSH_DIRECTOR_PRIVATE_IP}:4222"
+        blobstore:
+          provider: dav
+          options:
+            endpoint: http://${BOSH_DIRECTOR_PRIVATE_IP}:25250
+            user: agent
+            password: agent-password
+    agent: {mbus: "nats://nats:nats-password@${BOSH_DIRECTOR_PRIVATE_IP}:4222"}
+    ntp: &ntp [0.pool.ntp.org, 1.pool.ntp.org]
+cloud_provider:
+  template: {name: rackhd-cpi, release: ${CPI_RELEASE_NAME}}
+  mbus: "https://mbus:mbus-password@${BOSH_DIRECTOR_PRIVATE_IP}:6868"
+  properties:
+    rackhd-cpi:
+      api_url: "${RACKHD_API_URL}"
+      agent:
+        mbus: "https://mbus:Pbc7ssdfh8w2@0.0.0.0:6868"
+        blobstore:
+          provider: local
+          options: {blobstore_path: /var/vcap/micro_bosh/data/cache}
